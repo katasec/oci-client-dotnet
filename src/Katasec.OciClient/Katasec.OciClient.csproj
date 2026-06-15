@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <IsAotCompatible>true</IsAotCompatible>
+
+    <!-- NuGet -->
+    <PackageId>Katasec.OciClient</PackageId>
+    <Version>0.0.0-dev</Version>
+    <Authors>katasec</Authors>
+    <Description>AOT-safe .NET OCI Distribution Spec client — push, pull, bearer auth</Description>
+    <PackageTags>oci;registry;container;aot;native-aot</PackageTags>
+    <RepositoryUrl>https://github.com/katasec/oci-client-dotnet</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+</Project>
