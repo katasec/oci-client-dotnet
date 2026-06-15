@@ -1,13 +1,16 @@
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 
 namespace Katasec.OciClient;
 
 /// <summary>
 /// Handles OCI bearer token authentication.
-/// On a 401, parses WWW-Authenticate, fetches a token, and retries.
+/// On a 401, parses the WWW-Authenticate Bearer challenge, fetches a scoped JWT
+/// from the registry's token service (using the credential as Basic auth password),
+/// then retries with the JWT as Bearer.
 /// </summary>
-internal class BearerAuth(HttpClient http, string? staticToken)
+internal class BearerAuth(HttpClient http, string? credential)
 {
     private string? _cachedToken;
 
@@ -15,7 +18,10 @@ internal class BearerAuth(HttpClient http, string? staticToken)
         HttpRequestMessage request,
         CancellationToken ct)
     {
-        Authorize(request);
+        // Use a cached JWT if we have one — don't send the raw credential as Bearer
+        if (_cachedToken is not null)
+            Authorize(request, _cachedToken);
+
         var response = await http.SendAsync(request, ct);
 
         if (response.StatusCode != System.Net.HttpStatusCode.Unauthorized)
@@ -26,25 +32,30 @@ internal class BearerAuth(HttpClient http, string? staticToken)
 
         _cachedToken = await FetchTokenAsync(c, ct);
 
-        // Rebuild the request — HttpRequestMessage cannot be resent
         var retry = Clone(request);
-        Authorize(retry);
+        Authorize(retry, _cachedToken);
         return await http.SendAsync(retry, ct);
     }
 
-    private void Authorize(HttpRequestMessage req)
-    {
-        var token = staticToken ?? _cachedToken;
-        if (token is not null)
-            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-    }
+    private static void Authorize(HttpRequestMessage req, string bearerToken)
+        => req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", bearerToken);
 
     private async Task<string> FetchTokenAsync(
         (string Realm, string Service, string Scope) challenge,
         CancellationToken ct)
     {
         var url = $"{challenge.Realm}?service={Uri.EscapeDataString(challenge.Service)}&scope={Uri.EscapeDataString(challenge.Scope)}";
-        var resp = await http.GetAsync(url, ct);
+        var tokenReq = new HttpRequestMessage(HttpMethod.Get, url);
+
+        // Use the credential (e.g. GitHub PAT) as the Basic auth password.
+        // GHCR and most OCI registries accept any username with the token as password.
+        if (credential is not null)
+        {
+            var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes($"token:{credential}"));
+            tokenReq.Headers.Authorization = new AuthenticationHeaderValue("Basic", encoded);
+        }
+
+        var resp = await http.SendAsync(tokenReq, ct);
         resp.EnsureSuccessStatusCode();
 
         var body = await resp.Content.ReadAsStringAsync(ct);

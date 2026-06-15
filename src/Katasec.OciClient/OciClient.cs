@@ -17,12 +17,15 @@ public class OciClient : IDisposable
     public const string ExpertConfigMediaType = "application/vnd.forge.expert.config.v1+json";
     public const string ExpertLayerMediaType  = "application/vnd.forge.expert.v1";
 
-    public OciClient(string? token = null)
+    /// <param name="credential">
+    /// A registry credential (e.g. GitHub PAT). Used as the Basic auth password
+    /// when exchanging for a scoped bearer token on the first 401.
+    /// Leave null for public registries.
+    /// </param>
+    public OciClient(string? credential = null)
     {
         _http = new HttpClient();
-        _http.DefaultRequestHeaders.Accept.Add(
-            new MediaTypeWithQualityHeaderValue("application/vnd.oci.image.manifest.v1+json"));
-        _auth = new BearerAuth(_http, token);
+        _auth = new BearerAuth(_http, credential);
     }
 
     // -------------------------------------------------------------------------
@@ -102,10 +105,12 @@ public class OciClient : IDisposable
         var postResp = await _auth.SendAsync(postReq, ct);
         await EnsureSuccessAsync(postResp, ct);
 
-        var uploadUrl = postResp.Headers.Location
+        var locationRaw = postResp.Headers.Location
             ?? throw new OciException("Registry did not return upload Location");
 
-        // Append digest to the upload URL
+        // Location may be relative — resolve against the registry base
+        var registryBase = new Uri($"https://{registry}");
+        var uploadUrl = locationRaw.IsAbsoluteUri ? locationRaw : new Uri(registryBase, locationRaw);
         var putUrl = AppendDigest(uploadUrl, digest);
         var putReq = new HttpRequestMessage(HttpMethod.Put, putUrl)
         {
