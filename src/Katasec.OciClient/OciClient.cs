@@ -175,7 +175,7 @@ public class OciClient : IDisposable
     /// </summary>
     /// <param name="annotations">Optional extra manifest annotations (e.g. description, authors),
     /// merged over the standard org.opencontainers.image.* + dev.forge.* keys.</param>
-    public async Task PushExpertAsync(
+    public async Task<string> PushExpertAsync(
         string registry, string name, string tag,
         string expertMdContent,
         IReadOnlyDictionary<string, string>? annotations = null,
@@ -196,7 +196,8 @@ public class OciClient : IDisposable
             ArtifactType: ExpertArtifactType,
             Annotations: BuildAnnotations("expert", name, tag, annotations));
 
-        await PushManifestAsync(registry, name, tag, manifest, ct);
+        // Returns the manifest digest — the immutable @sha256:… reference for pinning.
+        return await PushManifestAsync(registry, name, tag, manifest, ct);
     }
 
     /// <summary>
@@ -204,7 +205,7 @@ public class OciClient : IDisposable
     /// <paramref name="bundleTar"/> is the whole mission — <c>mission.mcl</c> + lock + experts — as a
     /// tar (see <see cref="MissionBundle"/>), so a pull needs no recursive expert fetches.
     /// </summary>
-    public async Task PushMissionAsync(
+    public async Task<string> PushMissionAsync(
         string registry, string name, string tag,
         byte[] bundleTar,
         IReadOnlyDictionary<string, string>? annotations = null,
@@ -224,7 +225,8 @@ public class OciClient : IDisposable
             ArtifactType: MissionArtifactType,
             Annotations: BuildAnnotations("mission", name, tag, annotations));
 
-        await PushManifestAsync(registry, name, tag, manifest, ct);
+        // Returns the manifest digest — the immutable @sha256:… reference for digest-pinning.
+        return await PushManifestAsync(registry, name, tag, manifest, ct);
     }
 
     // -------------------------------------------------------------------------
