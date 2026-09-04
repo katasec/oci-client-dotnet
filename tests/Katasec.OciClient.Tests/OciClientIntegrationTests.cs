@@ -62,6 +62,28 @@ public class OciClientIntegrationTests
         Assert.Contains("name:", content);
     }
 
+    // The real registry's answer to the digest question: the pinned reference a caller records
+    // must be re-resolvable to byte-identical content, which is the whole reason a tag is not
+    // good enough. Live because only a real registry proves the header path end to end.
+    [Fact]
+    public async Task PullExpertWithDigest_ReturnsAnImmutableReferenceThatResolvesToTheSameContent()
+    {
+        using var client = Client();
+
+        var byTag = await client.PullExpertWithDigestAsync(
+            Registry, $"{Org}/forge-kubernetes-architect", "0.1.0");
+
+        Assert.StartsWith("sha256:", byTag.ManifestDigest);
+        Assert.Equal(71, byTag.ManifestDigest.Length);
+        Assert.Equal(byTag.ManifestDigest, byTag.ManifestDigest.ToLowerInvariant());
+
+        var byDigest = await client.PullExpertWithDigestAsync(
+            Registry, $"{Org}/forge-kubernetes-architect", byTag.ManifestDigest);
+
+        Assert.Equal(byTag.ManifestDigest, byDigest.ManifestDigest);
+        Assert.Equal(byTag.Content, byDigest.Content);
+    }
+
     [Fact]
     public async Task PushAndPull_RoundTrip_ContentMatches()
     {

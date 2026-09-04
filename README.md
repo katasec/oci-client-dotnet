@@ -16,12 +16,22 @@ dotnet add package Katasec.OciClient --source "https://nuget.pkg.github.com/kata
 using Katasec.OciClient;
 
 // Pull an expert artifact
-using var client = new OciClient(token: Environment.GetEnvironmentVariable("GITHUB_TOKEN"));
+using var client = new OciClient(credential: Environment.GetEnvironmentVariable("GITHUB_TOKEN"));
 
 string expertMd = await client.PullExpertAsync(
     registry:  "ghcr.io",
     name:      "katasec/kubernetes-architect",
     tag:       "0.1.0");
+
+// Pull an expert artifact and the immutable digest to pin it by. A tag moves; the manifest
+// digest does not. Both values come from the same pull, so the digest always describes the
+// content you actually received.
+PulledExpert pulled = await client.PullExpertWithDigestAsync(
+    registry:  "ghcr.io",
+    name:      "katasec/kubernetes-architect",
+    reference: "0.1.0");
+
+// pulled.ManifestDigest -> "sha256:…", re-resolvable as the reference on a later pull
 
 // Push an expert artifact
 await client.PushExpertAsync(

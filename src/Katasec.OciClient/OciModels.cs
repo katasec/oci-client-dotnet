@@ -27,6 +27,14 @@ public record OciManifest(
     [property: JsonPropertyName("artifactType")]   string?              ArtifactType = null,
     [property: JsonPropertyName("annotations")]    Dictionary<string, string>? Annotations = null);
 
+/// <summary>
+/// An expert artifact's content together with the immutable manifest digest it was resolved
+/// from. The digest is what a caller pins: a tag moves, <c>ManifestDigest</c> does not. Both
+/// values come from the same pull, so they always describe each other — a caller can never
+/// record a digest for content it did not actually receive.
+/// </summary>
+public sealed record PulledExpert(string Content, string ManifestDigest);
+
 internal record TokenResponse(
     [property: JsonPropertyName("token")]        string? Token,
     [property: JsonPropertyName("access_token")] string? AccessToken)

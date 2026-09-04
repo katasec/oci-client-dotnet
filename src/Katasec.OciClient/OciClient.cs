@@ -47,6 +47,15 @@ public class OciClient : IDisposable
         _auth = new BearerAuth(_http, credential);
     }
 
+    // Test seam, internal to this assembly's test project only (see InternalsVisibleTo in
+    // OciModels.cs). It exists so the digest/response handling can be exercised against a stubbed
+    // registry without TLS or a live port; the public surface gains no handler or endpoint knob.
+    internal OciClient(HttpMessageHandler handler, string? credential = null)
+    {
+        _http = new HttpClient(handler);
+        _auth = new BearerAuth(_http, credential);
+    }
+
     // -------------------------------------------------------------------------
     // Pull
 
@@ -56,6 +65,18 @@ public class OciClient : IDisposable
     public async Task<OciManifest> PullManifestAsync(
         string registry, string name, string reference,
         CancellationToken ct = default)
+        => (await PullManifestWithDigestAsync(registry, name, reference, ct)).Manifest;
+
+    /// <summary>
+    /// Pulls a manifest and the immutable digest that identifies it. One request answers both:
+    /// the response bytes are read once and used for the parse AND, when the registry omits the
+    /// optional <c>Docker-Content-Digest</c> header, for the computed digest — so the digest can
+    /// never describe a different response than the one that was parsed. A tag is never
+    /// substituted for a digest, and a second manifest request is never issued.
+    /// </summary>
+    private async Task<(OciManifest Manifest, string Digest)> PullManifestWithDigestAsync(
+        string registry, string name, string reference,
+        CancellationToken ct)
     {
         var url = $"https://{registry}/v2/{name}/manifests/{reference}";
         var req = new HttpRequestMessage(HttpMethod.Get, url);
@@ -64,9 +85,44 @@ public class OciClient : IDisposable
         var resp = await _auth.SendAsync(req, ct);
         await EnsureSuccessAsync(resp, ct);
 
-        var body = await resp.Content.ReadAsStringAsync(ct);
-        return JsonSerializer.Deserialize(body, OciJsonContext.Default.OciManifest)
+        var body = await resp.Content.ReadAsByteArrayAsync(ct);
+        var manifest = JsonSerializer.Deserialize(body, OciJsonContext.Default.OciManifest)
             ?? throw new OciException($"Empty manifest response from {registry}/{name}:{reference}");
+
+        return (manifest, ManifestDigest(resp, body, registry, name, reference));
+    }
+
+    // The registry's own digest wins when it is present and well formed. A malformed value is
+    // refused rather than quietly replaced by a computed one: a registry that reports a digest it
+    // cannot express correctly is broken, and hiding that would make the resulting pin look
+    // authoritative when nothing verified it.
+    private static string ManifestDigest(
+        HttpResponseMessage response, byte[] body, string registry, string name, string reference)
+    {
+        if (!response.Headers.TryGetValues(ContentDigestHeader, out var values))
+            return ComputeDigest(body);
+
+        var declared = values.FirstOrDefault();
+        var normalized = declared?.Trim().ToLowerInvariant();
+        if (!IsSha256Digest(normalized))
+            throw new OciException(
+                $"{registry}/{name}:{reference} returned an unusable {ContentDigestHeader}: '{declared}'");
+
+        return normalized!;
+    }
+
+    private static bool IsSha256Digest(string? digest)
+    {
+        if (digest is not { Length: 71 } || !digest.StartsWith("sha256:", StringComparison.Ordinal))
+            return false;
+
+        foreach (var character in digest.AsSpan(7))
+        {
+            if (!char.IsAsciiDigit(character) && (character < 'a' || character > 'f'))
+                return false;
+        }
+
+        return true;
     }
 
     /// <summary>
@@ -84,19 +140,31 @@ public class OciClient : IDisposable
     }
 
     /// <summary>
-    /// Convenience: pulls the first layer of an expert artifact and returns its content.
+    /// Pulls an expert artifact's content together with the immutable manifest digest it resolved
+    /// from — the value a caller pins in place of a moving tag. The digest is taken from the same
+    /// manifest response the layer descriptor came from, before the layer blob is pulled.
+    /// </summary>
+    public async Task<PulledExpert> PullExpertWithDigestAsync(
+        string registry, string name, string reference,
+        CancellationToken ct = default)
+    {
+        var (manifest, digest) = await PullManifestWithDigestAsync(registry, name, reference, ct);
+        var layer = manifest.Layers?.FirstOrDefault()
+            ?? throw new OciException($"Manifest for {name}:{reference} has no layers");
+
+        var bytes = await PullBlobAsync(registry, name, layer.Digest, ct);
+        return new PulledExpert(Encoding.UTF8.GetString(bytes), digest);
+    }
+
+    /// <summary>
+    /// Convenience: pulls the first layer of an expert artifact and returns its content. Kept as a
+    /// compatibility wrapper over <see cref="PullExpertWithDigestAsync"/> so existing callers that
+    /// do not pin a digest are unaffected.
     /// </summary>
     public async Task<string> PullExpertAsync(
         string registry, string name, string tag,
         CancellationToken ct = default)
-    {
-        var manifest = await PullManifestAsync(registry, name, tag, ct);
-        var layer = manifest.Layers.FirstOrDefault()
-            ?? throw new OciException($"Manifest for {name}:{tag} has no layers");
-
-        var bytes = await PullBlobAsync(registry, name, layer.Digest, ct);
-        return Encoding.UTF8.GetString(bytes);
-    }
+        => (await PullExpertWithDigestAsync(registry, name, tag, ct)).Content;
 
     // -------------------------------------------------------------------------
     // Push
@@ -165,7 +233,7 @@ public class OciClient : IDisposable
         var resp = await _auth.SendAsync(req, ct);
         await EnsureSuccessAsync(resp, ct);
 
-        return resp.Headers.TryGetValues("Docker-Content-Digest", out var vals)
+        return resp.Headers.TryGetValues(ContentDigestHeader, out var vals)
             ? vals.First()
             : ComputeDigest(bytes);
     }
@@ -310,6 +378,10 @@ public class OciClient : IDisposable
             throw new OciAuthException($"Authentication failed ({resp.StatusCode}): {body}");
         throw new OciException($"Registry returned {(int)resp.StatusCode}: {body}");
     }
+
+    // The registry's own digest for the manifest it just served or accepted. Optional per the
+    // distribution spec, which is why both the pull and the push path have a computed fallback.
+    private const string ContentDigestHeader = "Docker-Content-Digest";
 
     // sha256 of empty content — used as a no-op config blob
     private const string EmptyDigest =
