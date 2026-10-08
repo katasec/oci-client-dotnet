@@ -318,23 +318,33 @@ public class OciClient : IDisposable
         => Classify(await PullManifestAsync(registry, name, reference, ct));
 
     /// <summary>
-    /// Pulls a mission's self-contained bundle tar. Throws if the reference is not a Forge mission,
-    /// so a caller can't accidentally run an expert (or arbitrary artifact) as a mission.
+    /// Pulls a mission bundle together with the immutable manifest digest it resolved from. The
+    /// manifest is fetched once, so the returned digest describes the exact manifest whose layer
+    /// selected <see cref="PulledMission.Bundle"/>.
     /// </summary>
-    public async Task<byte[]> PullMissionAsync(
-        string registry, string name, string tag, CancellationToken ct = default)
+    public async Task<PulledMission> PullMissionWithDigestAsync(
+        string registry, string name, string reference, CancellationToken ct = default)
     {
-        var manifest = await PullManifestAsync(registry, name, tag, ct);
+        var (manifest, digest) = await PullManifestWithDigestAsync(registry, name, reference, ct);
         if (Classify(manifest) != ForgeArtifactKind.Mission)
             throw new OciException(
-                $"{name}:{tag} is not a Forge mission (artifactType={manifest.ArtifactType ?? "none"})");
+                $"{name}:{reference} is not a Forge mission (artifactType={manifest.ArtifactType ?? "none"})");
 
         var layer = manifest.Layers.FirstOrDefault(l => l.MediaType == MissionBundleMediaType)
             ?? manifest.Layers.FirstOrDefault()
-            ?? throw new OciException($"Mission {name}:{tag} has no bundle layer");
+            ?? throw new OciException($"Mission {name}:{reference} has no bundle layer");
 
-        return await PullBlobAsync(registry, name, layer.Digest, ct);
+        var bundle = await PullBlobAsync(registry, name, layer.Digest, ct);
+        return new PulledMission(bundle, digest);
     }
+
+    /// <summary>
+    /// Compatibility wrapper for callers that only need the mission bundle. It follows the same
+    /// digest-aware manifest path as <see cref="PullMissionWithDigestAsync"/>.
+    /// </summary>
+    public async Task<byte[]> PullMissionAsync(
+        string registry, string name, string reference, CancellationToken ct = default)
+        => (await PullMissionWithDigestAsync(registry, name, reference, ct)).Bundle;
 
     // -------------------------------------------------------------------------
     // Helpers
