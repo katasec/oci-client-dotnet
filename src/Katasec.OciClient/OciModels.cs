@@ -35,12 +35,6 @@ public record OciManifest(
 /// </summary>
 public sealed record PulledExpert(string Content, string ManifestDigest);
 
-/// <summary>
-/// A Forge mission bundle together with the immutable manifest digest it was resolved from.
-/// The digest pins the exact manifest whose bundle layer was retrieved.
-/// </summary>
-public sealed record PulledMission(byte[] Bundle, string ManifestDigest);
-
 internal record TokenResponse(
     [property: JsonPropertyName("token")]        string? Token,
     [property: JsonPropertyName("access_token")] string? AccessToken)
