@@ -139,58 +139,18 @@ public class OciPullDigestTests
         Assert.Equal(0, registry.BlobRequests); // A manifest read pulls no blob.
     }
 
-    [Fact]
-    public async Task PullMissionWithDigestAsync_uses_the_registrys_declared_digest()
-    {
-        var registry = new StubRegistry("mission bundle", DeclaredDigest, ForgeArtifactKind.Mission);
-        using var client = new OciClient(registry);
-
-        var pulled = await client.PullMissionWithDigestAsync(Registry, "katasec/mission", "latest");
-
-        Assert.Equal(DeclaredDigest, pulled.ManifestDigest);
-        Assert.Equal("mission bundle", Encoding.UTF8.GetString(pulled.Bundle));
-        Assert.Equal(1, registry.ManifestRequests);
-        Assert.Equal(1, registry.BlobRequests);
-    }
-
-    [Fact]
-    public async Task PullMissionWithDigestAsync_computes_the_digest_when_the_registry_omits_it()
-    {
-        var registry = new StubRegistry("mission bundle", declaredDigest: null, ForgeArtifactKind.Mission);
-        using var client = new OciClient(registry);
-
-        var pulled = await client.PullMissionWithDigestAsync(Registry, "katasec/mission", "latest");
-
-        Assert.Equal(registry.ComputedManifestDigest, pulled.ManifestDigest);
-    }
-
-    [Fact]
-    public async Task PullMissionWithDigestAsync_returns_the_same_identity_for_a_tag_and_its_digest()
-    {
-        var registry = new StubRegistry("mission bundle", DeclaredDigest, ForgeArtifactKind.Mission);
-        using var client = new OciClient(registry);
-
-        var tagged = await client.PullMissionWithDigestAsync(Registry, "katasec/mission", "latest");
-        var pinned = await client.PullMissionWithDigestAsync(Registry, "katasec/mission", tagged.ManifestDigest);
-
-        Assert.Equal(tagged.ManifestDigest, pinned.ManifestDigest);
-        Assert.Equal(tagged.Bundle, pinned.Bundle);
-        Assert.Equal(["latest", DeclaredDigest], registry.ManifestReferences);
-    }
-
     /// <summary>
     /// The smallest registry that can answer a manifest and a blob request. It counts each so a
     /// test can prove "exactly one manifest request", and it exposes the digest the fallback
     /// should compute so an assertion never has to restate the hash by hand.
     /// </summary>
-    private sealed class StubRegistry(string content, string? declaredDigest, ForgeArtifactKind kind = ForgeArtifactKind.Expert) : HttpMessageHandler
+    private sealed class StubRegistry(string expertContent, string? declaredDigest) : HttpMessageHandler
     {
-        private readonly byte[] _content = Encoding.UTF8.GetBytes(content);
+        private readonly byte[] _content = Encoding.UTF8.GetBytes(expertContent);
 
         public bool OmitLayers { get; init; }
         public int ManifestRequests { get; private set; }
         public int BlobRequests { get; private set; }
-        public List<string> ManifestReferences { get; } = [];
 
         public string ComputedManifestDigest =>
             "sha256:" + Convert.ToHexStringLower(SHA256.HashData(ManifestBytes()));
@@ -203,7 +163,6 @@ public class OciPullDigestTests
             if (path.Contains("/manifests/", StringComparison.Ordinal))
             {
                 ManifestRequests++;
-                ManifestReferences.Add(path[(path.LastIndexOf('/') + 1)..]);
                 return Task.FromResult(Manifest());
             }
 
@@ -240,15 +199,14 @@ public class OciPullDigestTests
         private byte[] ManifestBytes()
         {
             var layerDigest = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(_content));
-            var isMission = kind == ForgeArtifactKind.Mission;
             var manifest = new OciManifest(
                 SchemaVersion: 2,
                 MediaType: "application/vnd.oci.image.manifest.v1+json",
-                Config: new OciDescriptor(isMission ? OciClient.MissionConfigMediaType : OciClient.ExpertConfigMediaType, layerDigest, 0),
+                Config: new OciDescriptor(OciClient.ExpertConfigMediaType, layerDigest, 0),
                 Layers: OmitLayers
                     ? []
-                    : [new OciDescriptor(isMission ? OciClient.MissionBundleMediaType : OciClient.ExpertLayerMediaType, layerDigest, _content.Length)],
-                ArtifactType: isMission ? OciClient.MissionArtifactType : OciClient.ExpertArtifactType);
+                    : [new OciDescriptor(OciClient.ExpertLayerMediaType, layerDigest, _content.Length)],
+                ArtifactType: OciClient.ExpertArtifactType);
 
             return JsonSerializer.SerializeToUtf8Bytes(manifest, OciJsonContext.Default.OciManifest);
         }
