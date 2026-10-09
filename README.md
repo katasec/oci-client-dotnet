@@ -39,7 +39,36 @@ await client.PushExpertAsync(
     name:           "myorg/my-expert",
     tag:            "1.0.0",
     expertMdContent: File.ReadAllText("experts/MyExpert/expert.md"));
+
+// Pull a verified self-contained Forge mission; pin ManifestDigest for later retrieval.
+PulledMission mission = await client.PullMissionWithDigestAsync(
+    "ghcr.io", "katasec/forge-mission-assistant", "0.1.0");
+// Bundle is the tar's bytes. LayerDigest and LayerByteLength describe those exact bytes.
+// PullMissionAsync returns the same verified Bundle without the result metadata.
+
+// Verify a supplied credential before persisting it in the calling application.
+using var authenticated = new OciClient(credential: Environment.GetEnvironmentVariable("GITHUB_TOKEN"));
+await authenticated.VerifyRegistryCredentialAsync("ghcr.io");
 ```
+
+Manifest pulls verify SHA-256 against a requested digest and any `Docker-Content-Digest` header,
+and bound manifest content to 1 MiB. Verified mission pulls require Forge schema v1 mission metadata
+and exactly one bundle layer, check its declared size/hash, and stream within a 32 MiB default
+budget. `maxBundleBytes` can supply a positive caller-owned budget. Retrieval does not extract or
+authorize the bundle's contents; the caller owns those operations.
+
+Authentication accepts Bearer challenges with HTTPS token realms, using the constructor credential
+as the Basic password only for that exchange. Tokens expire and remain scoped to their registry,
+repository and latest challenge. Verification requires a supplied credential and a successful
+challenge/exchange/retry: anonymous success alone is refused. Basic registry challenges are
+unsupported, and rejected credentials never fall back to anonymous access.
+
+Manifest/blob downloads may follow five HTTPS redirects, removing Authorization across origins
+or repository boundaries. Foreign download/upload URLs never receive registry credentials or
+negotiate registry authentication. Token exchanges and credential verification follow no redirects.
+Token responses are limited to 64 KiB. Cancellation propagates; registry/integrity failures raise
+`OciException`, while authentication failures raise `OciAuthException`, without response bodies or
+credentials in their messages.
 
 ## Scope
 

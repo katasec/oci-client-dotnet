@@ -35,9 +35,14 @@ public record OciManifest(
 /// </summary>
 public sealed record PulledExpert(string Content, string ManifestDigest);
 
+/// <summary>A verified mission bundle and the immutable identities of its manifest and bytes.</summary>
+public sealed record PulledMission(byte[] Bundle, string ManifestDigest, string LayerDigest, long LayerByteLength);
+
 internal record TokenResponse(
     [property: JsonPropertyName("token")]        string? Token,
-    [property: JsonPropertyName("access_token")] string? AccessToken)
+    [property: JsonPropertyName("access_token")] string? AccessToken,
+    [property: JsonPropertyName("expires_in")]   long? ExpiresIn = null,
+    [property: JsonPropertyName("issued_at")]    string? IssuedAt = null)
 {
-    public string Value => Token ?? AccessToken ?? "";
+    public string Value => !string.IsNullOrWhiteSpace(Token) ? Token : AccessToken ?? "";
 }

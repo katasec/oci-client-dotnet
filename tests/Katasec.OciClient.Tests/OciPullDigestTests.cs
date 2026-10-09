@@ -29,27 +29,35 @@ public class OciPullDigestTests
         "sha256:1111111111111111111111111111111111111111111111111111111111111111";
 
     [Fact]
-    public async Task The_registrys_own_digest_header_is_what_gets_pinned()
+    public async Task A_digest_header_that_disagrees_with_the_bytes_is_refused()
     {
         var registry = new StubRegistry(ExpertContent, DeclaredDigest);
         using var client = new OciClient(registry);
-
-        var pulled = await client.PullExpertWithDigestAsync(Registry, Name, "0.1.0");
-
-        Assert.Equal(DeclaredDigest, pulled.ManifestDigest);
-        Assert.Equal(ExpertContent, pulled.Content);
-        Assert.NotEqual(registry.ComputedManifestDigest, pulled.ManifestDigest);
+        await Assert.ThrowsAsync<OciException>(
+            () => client.PullExpertWithDigestAsync(Registry, Name, "0.1.0"));
+        Assert.Equal(0, registry.BlobRequests);
     }
 
     [Fact]
-    public async Task An_uppercase_digest_header_is_normalized_rather_than_pinned_as_served()
+    public async Task An_uppercase_matching_digest_header_is_normalized()
     {
-        var registry = new StubRegistry(ExpertContent, DeclaredDigest.ToUpperInvariant());
+        var registry = new StubRegistry(ExpertContent, null);
+        registry.Declared = registry.ComputedManifestDigest.ToUpperInvariant();
         using var client = new OciClient(registry);
-
         var pulled = await client.PullExpertWithDigestAsync(Registry, Name, "0.1.0");
+        Assert.Equal(registry.ComputedManifestDigest, pulled.ManifestDigest);
+    }
 
-        Assert.Equal(DeclaredDigest, pulled.ManifestDigest);
+    [Fact]
+    public async Task A_requested_digest_is_checked_even_without_a_header()
+    {
+        var registry = new StubRegistry(ExpertContent, null);
+        using var client = new OciClient(registry);
+        await Assert.ThrowsAsync<OciException>(
+            () => client.PullExpertWithDigestAsync(Registry, Name, DeclaredDigest));
+        Assert.Equal(0, registry.BlobRequests);
+        var pulled = await client.PullExpertWithDigestAsync(Registry, Name, registry.ComputedManifestDigest);
+        Assert.Equal(registry.ComputedManifestDigest, pulled.ManifestDigest);
     }
 
     // The fallback hashes the bytes that were actually parsed, so it can never name a different
@@ -69,9 +77,10 @@ public class OciPullDigestTests
     [Fact]
     public async Task The_manifest_is_requested_exactly_once_whether_or_not_the_header_is_present()
     {
-        foreach (var declared in new[] { DeclaredDigest, null })
+        foreach (var includeHeader in new[] { true, false })
         {
-            var registry = new StubRegistry(ExpertContent, declared);
+            var registry = new StubRegistry(ExpertContent, null);
+            if (includeHeader) registry.Declared = registry.ComputedManifestDigest;
             using var client = new OciClient(registry);
 
             await client.PullExpertWithDigestAsync(Registry, Name, "0.1.0");
@@ -104,7 +113,7 @@ public class OciPullDigestTests
     [Fact]
     public async Task A_manifest_with_no_layers_fails_before_any_blob_is_pulled()
     {
-        var registry = new StubRegistry(ExpertContent, DeclaredDigest) { OmitLayers = true };
+        var registry = new StubRegistry(ExpertContent, null) { OmitLayers = true };
         using var client = new OciClient(registry);
 
         await Assert.ThrowsAsync<OciException>(
@@ -118,7 +127,7 @@ public class OciPullDigestTests
     [Fact]
     public async Task PullExpertAsync_returns_the_same_content_as_the_digest_aware_pull()
     {
-        var registry = new StubRegistry(ExpertContent, DeclaredDigest);
+        var registry = new StubRegistry(ExpertContent, null);
         using var client = new OciClient(registry);
 
         var content = await client.PullExpertAsync(Registry, Name, "0.1.0");
@@ -130,7 +139,7 @@ public class OciPullDigestTests
     [Fact]
     public async Task PullManifestAsync_still_returns_the_parsed_manifest()
     {
-        var registry = new StubRegistry(ExpertContent, DeclaredDigest);
+        var registry = new StubRegistry(ExpertContent, null);
         using var client = new OciClient(registry);
 
         var manifest = await client.PullManifestAsync(Registry, Name, "0.1.0");
@@ -148,6 +157,7 @@ public class OciPullDigestTests
     {
         private readonly byte[] _content = Encoding.UTF8.GetBytes(expertContent);
 
+        public string? Declared { get; set; } = declaredDigest;
         public bool OmitLayers { get; init; }
         public int ManifestRequests { get; private set; }
         public int BlobRequests { get; private set; }
@@ -190,8 +200,8 @@ public class OciPullDigestTests
 
             // TryAddWithoutValidation, so a deliberately malformed value reaches the client
             // instead of being rejected by HttpHeaders on the way out.
-            if (declaredDigest is not null)
-                response.Headers.TryAddWithoutValidation("Docker-Content-Digest", declaredDigest);
+            if (Declared is not null)
+                response.Headers.TryAddWithoutValidation("Docker-Content-Digest", Declared);
 
             return response;
         }
