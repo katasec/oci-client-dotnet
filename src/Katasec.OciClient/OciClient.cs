@@ -43,7 +43,8 @@ public class OciClient : IDisposable
     /// </param>
     public OciClient(string? credential = null)
     {
-        _http = new HttpClient();
+        _http = new HttpClient(new HttpClientHandler
+        { AllowAutoRedirect = false, AutomaticDecompression = System.Net.DecompressionMethods.All });
         _auth = new BearerAuth(_http, credential);
     }
 
@@ -69,8 +70,8 @@ public class OciClient : IDisposable
 
     /// <summary>
     /// Pulls a manifest and the immutable digest that identifies it. One request answers both:
-    /// the response bytes are read once and used for the parse AND, when the registry omits the
-    /// optional <c>Docker-Content-Digest</c> header, for the computed digest — so the digest can
+    /// the response bytes are read once and used for the parse and computed digest, checked against
+    /// the requested digest and any <c>Docker-Content-Digest</c> header — so the digest can
     /// never describe a different response than the one that was parsed. A tag is never
     /// substituted for a digest, and a second manifest request is never issued.
     /// </summary>
@@ -78,37 +79,44 @@ public class OciClient : IDisposable
         string registry, string name, string reference,
         CancellationToken ct)
     {
+        if (reference.Contains(':')) NormalizeDigest(reference, "requested manifest digest");
         var url = $"https://{registry}/v2/{name}/manifests/{reference}";
-        var req = new HttpRequestMessage(HttpMethod.Get, url);
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
         req.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/vnd.oci.image.manifest.v1+json"));
 
-        var resp = await _auth.SendAsync(req, ct);
-        await EnsureSuccessAsync(resp, ct);
-
-        var body = await resp.Content.ReadAsByteArrayAsync(ct);
-        var manifest = JsonSerializer.Deserialize(body, OciJsonContext.Default.OciManifest)
-            ?? throw new OciException($"Empty manifest response from {registry}/{name}:{reference}");
-
-        return (manifest, ManifestDigest(resp, body, registry, name, reference));
+        using var resp = await _auth.SendAsync(req, registry, name, ct, followRedirects: true);
+        EnsureSuccess(resp);
+        var body = await BoundedResponseBody.ReadAsync(resp, 1024 * 1024, "manifest", ct);
+        var digest = ManifestDigest(resp, body, reference);
+        try
+        {
+            var manifest = JsonSerializer.Deserialize(body, OciJsonContext.Default.OciManifest)
+                ?? throw new OciException("The registry returned an empty manifest.");
+            return (manifest, digest);
+        }
+        catch (JsonException)
+        { throw new OciException("The registry returned a malformed manifest."); }
     }
 
-    // The registry's own digest wins when it is present and well formed. A malformed value is
-    // refused rather than quietly replaced by a computed one: a registry that reports a digest it
-    // cannot express correctly is broken, and hiding that would make the resulting pin look
-    // authoritative when nothing verified it.
+    // Every identity is checked against the exact response bytes, before they are parsed.
     private static string ManifestDigest(
-        HttpResponseMessage response, byte[] body, string registry, string name, string reference)
+        HttpResponseMessage response, byte[] body, string reference)
     {
-        if (!response.Headers.TryGetValues(ContentDigestHeader, out var values))
-            return ComputeDigest(body);
+        var actual = ComputeDigest(body);
+        if (reference.Contains(':') && NormalizeDigest(reference, "requested manifest digest") != actual)
+            throw new OciException("The manifest bytes do not match the requested digest.");
+        if (!response.Headers.TryGetValues(ContentDigestHeader, out var values)) return actual;
+        var headers = values.ToArray();
+        if (headers.Length != 1 || NormalizeDigest(headers[0], ContentDigestHeader) != actual)
+            throw new OciException($"The manifest bytes do not match {ContentDigestHeader}.");
+        return actual;
+    }
 
-        var declared = values.FirstOrDefault();
-        var normalized = declared?.Trim().ToLowerInvariant();
-        if (!IsSha256Digest(normalized))
-            throw new OciException(
-                $"{registry}/{name}:{reference} returned an unusable {ContentDigestHeader}: '{declared}'");
-
-        return normalized!;
+    private static string NormalizeDigest(string? digest, string field)
+    {
+        var normalized = digest?.Trim().ToLowerInvariant();
+        return IsSha256Digest(normalized) ? normalized! :
+            throw new OciException($"The {field} is not a valid SHA-256 digest.");
     }
 
     private static bool IsSha256Digest(string? digest)
@@ -131,12 +139,18 @@ public class OciClient : IDisposable
     public async Task<byte[]> PullBlobAsync(
         string registry, string name, string digest,
         CancellationToken ct = default)
+        => await PullBlobCoreAsync(registry, name, digest, null, ct);
+
+    private async Task<byte[]> PullBlobCoreAsync(
+        string registry, string name, string digest, long? maxBytes, CancellationToken ct)
     {
         var url = $"https://{registry}/v2/{name}/blobs/{digest}";
-        var req = new HttpRequestMessage(HttpMethod.Get, url);
-        var resp = await _auth.SendAsync(req, ct);
-        await EnsureSuccessAsync(resp, ct);
-        return await resp.Content.ReadAsByteArrayAsync(ct);
+        using var req = new HttpRequestMessage(HttpMethod.Get, url);
+        using var resp = await _auth.SendAsync(req, registry, name, ct, followRedirects: true);
+        EnsureSuccess(resp);
+        return maxBytes is { } limit
+            ? await BoundedResponseBody.ReadAsync(resp, limit, "mission bundle", ct)
+            : await resp.Content.ReadAsByteArrayAsync(ct);
     }
 
     /// <summary>
@@ -180,17 +194,17 @@ public class OciClient : IDisposable
         var digest = ComputeDigest(content);
 
         // Check if blob already exists
-        var headReq = new HttpRequestMessage(HttpMethod.Head,
+        using var headReq = new HttpRequestMessage(HttpMethod.Head,
             $"https://{registry}/v2/{name}/blobs/{digest}");
-        var headResp = await _auth.SendAsync(headReq, ct);
+        using var headResp = await _auth.SendAsync(headReq, registry, name, ct);
         if (headResp.IsSuccessStatusCode)
             return digest;
 
         // POST to get an upload session
-        var postReq = new HttpRequestMessage(HttpMethod.Post,
+        using var postReq = new HttpRequestMessage(HttpMethod.Post,
             $"https://{registry}/v2/{name}/blobs/uploads/");
-        var postResp = await _auth.SendAsync(postReq, ct);
-        await EnsureSuccessAsync(postResp, ct);
+        using var postResp = await _auth.SendAsync(postReq, registry, name, ct);
+        EnsureSuccess(postResp);
 
         var locationRaw = postResp.Headers.Location
             ?? throw new OciException("Registry did not return upload Location");
@@ -199,14 +213,14 @@ public class OciClient : IDisposable
         var registryBase = new Uri($"https://{registry}");
         var uploadUrl = locationRaw.IsAbsoluteUri ? locationRaw : new Uri(registryBase, locationRaw);
         var putUrl = AppendDigest(uploadUrl, digest);
-        var putReq = new HttpRequestMessage(HttpMethod.Put, putUrl)
+        using var putReq = new HttpRequestMessage(HttpMethod.Put, putUrl)
         {
             Content = new ByteArrayContent(content)
         };
         putReq.Content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
 
-        var putResp = await _auth.SendAsync(putReq, ct);
-        await EnsureSuccessAsync(putResp, ct);
+        using var putResp = await _auth.SendAsync(putReq, registry, name, ct);
+        EnsureSuccess(putResp);
 
         return digest;
     }
@@ -223,15 +237,15 @@ public class OciClient : IDisposable
         var bytes = Encoding.UTF8.GetBytes(json);
 
         var url = $"https://{registry}/v2/{name}/manifests/{tag}";
-        var req = new HttpRequestMessage(HttpMethod.Put, url)
+        using var req = new HttpRequestMessage(HttpMethod.Put, url)
         {
             Content = new ByteArrayContent(bytes)
         };
         req.Content.Headers.ContentType =
             new MediaTypeHeaderValue("application/vnd.oci.image.manifest.v1+json");
 
-        var resp = await _auth.SendAsync(req, ct);
-        await EnsureSuccessAsync(resp, ct);
+        using var resp = await _auth.SendAsync(req, registry, name, ct);
+        EnsureSuccess(resp);
 
         return resp.Headers.TryGetValues(ContentDigestHeader, out var vals)
             ? vals.First()
@@ -323,17 +337,48 @@ public class OciClient : IDisposable
     /// </summary>
     public async Task<byte[]> PullMissionAsync(
         string registry, string name, string tag, CancellationToken ct = default)
+        => (await PullMissionWithDigestAsync(registry, name, tag, ct)).Bundle;
+
+    /// <summary>Returns a size- and SHA-256-verified Forge bundle and its immutable manifest identity.</summary>
+    public async Task<PulledMission> PullMissionWithDigestAsync(
+        string registry, string name, string reference, CancellationToken ct = default,
+        long maxBundleBytes = 33554432)
     {
-        var manifest = await PullManifestAsync(registry, name, tag, ct);
-        if (Classify(manifest) != ForgeArtifactKind.Mission)
-            throw new OciException(
-                $"{name}:{tag} is not a Forge mission (artifactType={manifest.ArtifactType ?? "none"})");
+        if (maxBundleBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maxBundleBytes));
+        var (manifest, manifestDigest) = await PullManifestWithDigestAsync(registry, name, reference, ct);
+        var layer = MissionLayer(manifest, maxBundleBytes);
+        var layerDigest = NormalizeDigest(layer.Digest, "mission layer digest");
+        var bundle = await PullBlobCoreAsync(registry, name, layerDigest, layer.Size, ct);
+        if (bundle.LongLength != layer.Size || ComputeDigest(bundle) != layerDigest)
+            throw new OciException("The mission bundle bytes do not match their descriptor.");
+        return new PulledMission(bundle, manifestDigest, layerDigest, bundle.LongLength);
+    }
 
-        var layer = manifest.Layers.FirstOrDefault(l => l.MediaType == MissionBundleMediaType)
-            ?? manifest.Layers.FirstOrDefault()
-            ?? throw new OciException($"Mission {name}:{tag} has no bundle layer");
+    /// <summary>Verifies this client's supplied credential through a Bearer challenge; persists nothing.</summary>
+    public Task VerifyRegistryCredentialAsync(string registry, CancellationToken ct = default) =>
+        _auth.VerifyCredentialAsync(registry, ct);
 
-        return await PullBlobAsync(registry, name, layer.Digest, ct);
+    private static OciDescriptor MissionLayer(OciManifest manifest, long maxBundleBytes)
+    {
+        if (manifest.SchemaVersion != 2 || manifest.MediaType != "application/vnd.oci.image.manifest.v1+json" ||
+            manifest.ArtifactType != MissionArtifactType || manifest.Config is null ||
+            manifest.Config.MediaType != MissionConfigMediaType || manifest.Annotations is null ||
+            !manifest.Annotations.TryGetValue(AnnSchemaVersion, out var schema) || schema != ForgeSchemaVersion ||
+            !manifest.Annotations.TryGetValue(AnnKind, out var kind) || kind != "mission")
+            throw new OciException("The manifest is not a supported Forge mission.");
+        if (manifest.Layers is not { Count: 1 } || manifest.Layers[0] is not { } layer ||
+            layer.MediaType != MissionBundleMediaType)
+            throw new OciException("A Forge mission requires exactly one bundle layer.");
+        ValidateDescriptor(manifest.Config, maxBundleBytes);
+        ValidateDescriptor(layer, maxBundleBytes);
+        return layer;
+    }
+
+    private static void ValidateDescriptor(OciDescriptor descriptor, long maxBytes)
+    {
+        NormalizeDigest(descriptor.Digest, "mission descriptor digest");
+        if (descriptor.Size < 0 || descriptor.Size > maxBytes)
+            throw new OciException("The mission descriptor size is outside the bundle budget.");
     }
 
     // -------------------------------------------------------------------------
@@ -370,13 +415,12 @@ public class OciClient : IDisposable
         return new Uri(baseUri, $"{baseUri.PathAndQuery}{sep}digest={Uri.EscapeDataString(digest)}");
     }
 
-    private static async Task EnsureSuccessAsync(HttpResponseMessage resp, CancellationToken ct)
+    private static void EnsureSuccess(HttpResponseMessage resp)
     {
         if (resp.IsSuccessStatusCode) return;
-        var body = await resp.Content.ReadAsStringAsync(ct);
         if (resp.StatusCode == System.Net.HttpStatusCode.Unauthorized)
-            throw new OciAuthException($"Authentication failed ({resp.StatusCode}): {body}");
-        throw new OciException($"Registry returned {(int)resp.StatusCode}: {body}");
+            throw new OciAuthException("The registry rejected Bearer authentication.");
+        throw new OciException($"The registry returned HTTP {(int)resp.StatusCode}.");
     }
 
     // The registry's own digest for the manifest it just served or accepted. Optional per the
